@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+tmp/
+.DS_Store
+.env
+.env.*
+*.log
+*.sock
+.desktop/
+.pool/
+data/
+backups/
+mcp-config.generated.toml

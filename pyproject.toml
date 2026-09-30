@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "agy-mcp-standalone"
+version = "2026.9.21"
+requires-python = ">=3.11"
+dependencies = ["mcp==1.30.0", "watchfiles==1.1.1", "uvicorn>=0.30,<1"]
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1"]
+[project.scripts]
+agy-mcp = "agy_mcp.server:main"
+[tool.setuptools.packages.find]
+include = ["agy_mcp*"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
