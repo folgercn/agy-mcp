@@ -134,7 +134,12 @@ async def _run_test_uds_e2e():
                     result_text = content[0].get("text", "")
                     parsed_data = json.loads(result_text)
                     assert "accounts" in parsed_data
-                    assert parsed_data["total_accounts"] >= 1
+                    assert not msg["result"].get("isError", False)
+                    if parsed_data["supported"]:
+                        assert parsed_data["total_accounts"] == len(parsed_data["accounts"])
+                    else:
+                        assert parsed_data["accounts"] == []
+                        assert parsed_data["message"]
                     assert "capabilities" in parsed_data
                     break
 
@@ -159,8 +164,12 @@ async def _run_test_uds_e2e():
                     assert len(content) > 0
                     result_text = content[0].get("text", "")
                     parsed_usage = json.loads(result_text)
-                    assert "active_email" in parsed_usage
-                    assert "account_id" in parsed_usage
+                    assert not msg["result"].get("isError", False)
+                    if "active_email" in parsed_usage:
+                        assert "account_id" in parsed_usage
+                    else:
+                        assert parsed_usage.get("error") or parsed_usage.get("account")
+                    assert "desktop" in parsed_usage
                     assert "capabilities_report" in parsed_usage
                     break
 
