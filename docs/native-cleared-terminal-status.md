@@ -1,0 +1,7 @@
+# Compacted native trajectory history
+
+The installed Antigravity protocol defines `CORTEX_STEP_STATUS_CLEARED` as enum value 5. The corresponding native UI classifies this status as not running in its background-task selector. It gives it the completed-state icon and explains that historical messages were cleared to save space; missing step details are handled as cleared history, rather than an unknown empty step.
+
+This contract was read from the currently served installed UI and its generated Cortex protobuf descriptor, not inferred from the status name. The native UI asset SHA-256 is `47f36abaabd34f7d54a95df40d942b609c02db9f5c04d56b124a048571b9f16d`. The source expressions are the `CortexStepStatus` enum, `Fda` status icon selector, the background-task `isRunning` predicate, `qk` empty-step predicate and the cleared-message revert tooltip. Private runtime and extracted implementation evidence remain outside this repository.
+
+Strict recovery therefore recognizes CLEARED as non-running compacted history alongside DONE, ERROR and CANCELED. This does not turn it into successful execution or scientific acceptance. Recovery still requires an IDLE cascade, complete consistent step count, no unknown or executing steps, matching owned terminal jobs and conversation, dead processes and exclusive locks. GENERATING, QUEUED, PENDING, RUNNING, WAITING, UNSPECIFIED, INVALID, INTERRUPTED and future/missing states remain refused. No task/job result is rewritten; recovery only archives the original occupancy evidence after all checks pass.

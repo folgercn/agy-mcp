@@ -182,3 +182,64 @@ def test_generic_missing_cid_failure_is_not_ignored(state,mutation):
     d.save(directory/'job.json',job);d.save(directory/'result.json',result)
     with pytest.raises(d.Failure):s.reconcile_job('owned',Backend)
     assert (state/'active.json').exists()
+
+
+def test_native_cleared_history_archives_with_full_paged_idle_proof(state):
+    # Shapes/counts from the live compacted history; no private step payloads.
+    steps=([{'status':'CORTEX_STEP_STATUS_CLEARED'}]*5317
+           +[{'status':'CORTEX_STEP_STATUS_DONE'}]*1911
+           +[{'status':'CORTEX_STEP_STATUS_ERROR'}]*11
+           +[{'status':'CORTEX_STEP_STATUS_CANCELED'}])
+    calls=[]
+    class Native(d.Desktop):
+        def __init__(self):pass
+        def rpc(self,method,args):
+            calls.append((method,args))
+            if method=='GetCascadeTrajectory':
+                return {'status':d.IDLE,'numTotalSteps':len(steps),'trajectory':{'steps':steps[:1000]}}
+            assert method=='GetCascadeTrajectorySteps'
+            return {'steps':steps[args['stepOffset']:]}
+    original=(state/'active.json').read_bytes()
+    task=(state/'tasks/old.json').read_bytes()
+    job=(s.jobpath('owned')/'job.json').read_bytes()
+    result=(s.jobpath('owned')/'result.json').read_bytes()
+    first=s.reconcile_job('owned',Native)
+    assert Path(first['archive_path']).read_bytes()==original
+    evidence=d.read(Path(first['evidence_path']))
+    assert evidence['state']['verified_step_count']==7240
+    assert calls[0][0]==calls[2][0]=='GetCascadeTrajectory'
+    assert calls[1][0]=='GetCascadeTrajectorySteps'
+    replay=s.reconcile_job('owned',Native)
+    assert replay['archive_path']==first['archive_path'] and replay['reused_reconciliation']
+    assert (state/'tasks/old.json').read_bytes()==task
+    assert (s.jobpath('owned')/'job.json').read_bytes()==job
+    assert (s.jobpath('owned')/'result.json').read_bytes()==result
+
+
+@pytest.mark.parametrize('status', ['GENERATING','QUEUED','PENDING','RUNNING','WAITING',
+                                   'UNSPECIFIED','INVALID','INTERRUPTED','FUTURE_STATUS',None])
+def test_cleared_history_never_hides_unfinished_or_unknown_step(state,status):
+    class Probe(Backend):
+        def trajectory(self,cid):
+            bad={} if status is None else {'status':'CORTEX_STEP_STATUS_'+status}
+            return {'status':d.IDLE,'numTotalSteps':2,'trajectory':{'steps':[{'status':'CORTEX_STEP_STATUS_CLEARED'},bad]}}
+    original=(state/'active.json').read_bytes()
+    with pytest.raises(d.Failure):s.reconcile_job('owned',Probe)
+    assert (state/'active.json').read_bytes()==original
+    assert not list((state/'reconciled').glob('*.active.json'))
+
+
+@pytest.mark.parametrize('mutation', ['busy','wrong_total','missing_steps','wrong_owner_result','uncertain_job'])
+def test_cleared_history_retains_all_other_recovery_gates(state,mutation):
+    class Probe(Backend):
+        def trajectory(self,cid):
+            value={'status':d.IDLE,'numTotalSteps':1,'trajectory':{'steps':[{'status':'CORTEX_STEP_STATUS_CLEARED'}]}}
+            if mutation=='busy':value['status']='CASCADE_RUN_STATUS_RUNNING'
+            if mutation=='wrong_total':value['numTotalSteps']=2
+            if mutation=='missing_steps':value['trajectory']={}
+            return value
+    if mutation=='wrong_owner_result':d.save(s.jobpath('owned')/'result.json',{'outcome':'turn_returned','conversation_id':'other'})
+    if mutation=='uncertain_job':d.save(s.jobpath('owned')/'result.json',{'outcome':'uncertain','conversation_id':'cid'})
+    original=(state/'active.json').read_bytes()
+    with pytest.raises(d.Failure):s.reconcile_job('owned',Probe)
+    assert (state/'active.json').read_bytes()==original
