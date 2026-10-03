@@ -117,3 +117,68 @@ def test_rename_failure_keeps_active_and_restart_can_finish(state,monkeypatch):
     result=s.reconcile_job('owned',Backend)
     assert Path(result['archive_path']).exists()
     assert not (state/'active.json').exists()
+
+
+@pytest.mark.parametrize('snapshot',[
+    {'status':d.IDLE}, {'status':d.IDLE,'trajectory':{}},
+    {'status':d.IDLE,'trajectory':{'steps':[{}]}},
+    {'status':d.IDLE,'trajectory':{'steps':[{'status':'CORTEX_STEP_STATUS_UNSPECIFIED'}]}},
+    {'status':d.IDLE,'trajectory':{'steps':[{'status':'CORTEX_STEP_STATUS_FUTURE_PENDING'}]}},
+    {'status':d.IDLE,'trajectory':{'steps':[]},'numTotalSteps':1},
+    {'status':d.IDLE,'trajectory':{'steps':[]},'numTotalSteps':False},
+    {'status':d.IDLE,'trajectory':{'steps':[]},'numTotalSteps':-1},
+    {'status':d.IDLE,'trajectory':{'steps':{}},'numTotalSteps':0},
+])
+def test_unknown_or_incomplete_trajectory_keeps_active(state,snapshot):
+    class Unknown:
+        def trajectory(self,cid):return snapshot
+    before=(state/'active.json').read_bytes()
+    with pytest.raises(d.Failure):s.reconcile_job('owned',Unknown)
+    assert (state/'active.json').read_bytes()==before
+
+
+def test_proven_pre_start_rejection_does_not_poison_recovery(state,monkeypatch):
+    import os
+    monkeypatch.setattr(d,'alive',lambda pid:pid==os.getpid())
+    d.save(state/'config.json',{'max_concurrency':1})
+    result=d.read(s.jobpath('owned')/'result.json')
+    rec={'task':'old','state':'idle','conversation_id':'cid','cwd':str(state),
+         'mode':'research','last_result':result}
+    d.save(state/'tasks/old.json',rec)
+    class NoProvider:
+        def __init__(self,task=None):pass
+        def __getattr__(self,name):raise AssertionError('No backend operation allowed')
+    monkeypatch.setattr(d,'Desktop',NoProvider)
+    monkeypatch.setattr(d,'ACTIVITY_PATH',None)
+    directory=s.jobpath('rejected');directory.mkdir()
+    d.save(directory/'job.json',{'job_id':'rejected','task_id':'old','pid':999998,'status':'submitted'})
+    d.save(directory/'request.json',{'task_id':'old','prompt':'offline','cwd':str(state),
+                                   'mode':'research','timeout_seconds':5,'ack_uncertain':False})
+    s.worker('rejected')
+    rejection=d.read(directory/'result.json')
+    assert rejection['outcome']=='not_executed'
+    assert rejection['conversation_id'] is None
+    assert rejection['rejection_evidence']['model_message_sent'] is False
+    assert d.read(state/'tasks/old.json')==rec
+    assert s.reconcile_job('owned',Backend)['status']=='reconciled'
+
+
+@pytest.mark.parametrize('mutation',['missing_proof','wrong_hash','sent','missing_cid','numeric_false','missing_job_outcome'])
+def test_generic_missing_cid_failure_is_not_ignored(state,mutation):
+    import hashlib
+    evidence={'phase':'before_conversation_start','task_id':'old','new_conversation_started':False,
+              'model_message_sent':False,'owner_task':'old','owner_conversation_id':'cid',
+              'owner_record_sha256':hashlib.sha256((state/'active.json').read_bytes()).hexdigest()}
+    result={'status':'ERROR','error':'STALE_ACTIVE_REQUIRES_RECONCILE','outcome':'not_executed',
+            'conversation_id':None,'task':'old','rejection_evidence':evidence}
+    if mutation=='missing_proof':result.pop('rejection_evidence')
+    if mutation=='wrong_hash':evidence['owner_record_sha256']='unknown'
+    if mutation=='sent':evidence['model_message_sent']=True
+    if mutation=='missing_cid':result.pop('conversation_id')
+    if mutation=='numeric_false':evidence['model_message_sent']=0
+    directory=s.jobpath('failed');directory.mkdir()
+    job={'job_id':'failed','task_id':'old','pid':999998,'status':'failed','outcome':'not_executed'}
+    if mutation=='missing_job_outcome':job.pop('outcome')
+    d.save(directory/'job.json',job);d.save(directory/'result.json',result)
+    with pytest.raises(d.Failure):s.reconcile_job('owned',Backend)
+    assert (state/'active.json').exists()

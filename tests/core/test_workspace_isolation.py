@@ -82,3 +82,26 @@ def test_receipt_persistence_failure_prevents_message():
         assert calls.count('StartCascade')==1
         assert 'SendUserCascadeMessage' not in calls
     finally:fixture.tearDown()
+
+
+@pytest.mark.parametrize('response',[
+    {'status':d.IDLE}, {'trajectory':{'steps':[]},'numTotalSteps':-1},
+    {'trajectory':{'steps':[]},'numTotalSteps':False},
+    {'trajectory':{'steps':[{}]},'numTotalSteps':0},
+])
+def test_native_trajectory_rejects_inconsistent_shape_and_totals(response):
+    backend=d.Desktop.__new__(d.Desktop)
+    backend.rpc=lambda method,args:response
+    with pytest.raises(d.Failure):backend.trajectory('cid')
+
+
+@pytest.mark.parametrize('page',[
+    None, {'steps':[]}, {'steps':{}},
+    {'steps':[{},{}]}, {'steps':[{}],'numTotalSteps':True},
+    {'steps':[{}],'numTotalSteps':2},
+])
+def test_native_paging_must_complete_exact_reported_total(page):
+    backend=d.Desktop.__new__(d.Desktop)
+    backend.rpc=lambda method,args: ({'trajectory':{'steps':[]},'numTotalSteps':1}
+                                     if method=='GetCascadeTrajectory' else page)
+    with pytest.raises(d.Failure):backend.trajectory('cid')

@@ -255,12 +255,20 @@ class Desktop:
 
     def trajectory(self,cid):
         result=self.rpc('GetCascadeTrajectory',{'cascadeId':cid})
-        steps=result.get('trajectory',{}).get('steps',[])
+        trajectory=result.get('trajectory') if isinstance(result,dict) else None
+        if not isinstance(trajectory,dict) or not isinstance(trajectory.get('steps'),list):
+            raise Failure('INCOMPLETE_TRAJECTORY')
+        steps=trajectory['steps']
         total=result.get('numTotalSteps',len(steps))
+        if type(total) is not int or total<0 or len(steps)>total:
+            raise Failure('INCOMPLETE_TRAJECTORY')
         while len(steps)<total:
             page=self.rpc('GetCascadeTrajectorySteps',{'cascadeId':cid,'stepOffset':len(steps)})
+            if not isinstance(page,dict):raise Failure('INCOMPLETE_TRAJECTORY')
             new=page.get('steps',[])
-            if not new:raise Failure('INCOMPLETE_TRAJECTORY')
+            if (not isinstance(new,list) or not new or len(steps)+len(new)>total
+                    or type(page.get('numTotalSteps',total)) is not int
+                    or page.get('numTotalSteps',total)!=total):raise Failure('INCOMPLETE_TRAJECTORY')
             steps.extend(new)
         return result
     def cancel(self,cid):
@@ -520,6 +528,20 @@ def verify_workspace(receipt, cid, environment_id, cwd):
     return {'cascadeId':cid,'projectEnvInfo':info}
 
 
+def verify_terminal_trajectory(snapshot):
+    """Strict recovery proof, separate from advisory conversation readiness."""
+    trajectory=snapshot.get('trajectory') if isinstance(snapshot,dict) else None
+    if not isinstance(trajectory,dict) or not isinstance(trajectory.get('steps'),list):
+        raise Failure('RECONCILE_UNVERIFIED')
+    steps=trajectory['steps']
+    total=snapshot.get('numTotalSteps',len(steps))
+    terminal={'CORTEX_STEP_STATUS_DONE','CORTEX_STEP_STATUS_ERROR','CORTEX_STEP_STATUS_CANCELED'}
+    if (snapshot.get('status')!=IDLE or type(total) is not int or total<0 or total!=len(steps)
+            or any(not isinstance(step,dict) or step.get('status') not in terminal for step in steps)):
+        raise Failure('RECONCILE_UNVERIFIED')
+    return dict(conversation_state(snapshot),verified_step_count=len(steps))
+
+
 def run_task(args):
     task=args.task; path=STATE/'tasks'/(task+'.json'); deadline=time.monotonic()+args.timeout
     ticket=STATE/'queue'/(f'{time.time_ns():020d}-'+uuid.uuid4().hex+'.json')
@@ -563,8 +585,13 @@ def run_task(args):
         # owned session before allowing another run; never replay its prompt.
         previous=read(active_path)
         if previous:
-            raise Failure('STALE_ACTIVE_REQUIRES_RECONCILE',
-                          'Inspect and reconcile the owned job; no record removed and no new task started.')
+            failure=Failure('STALE_ACTIVE_REQUIRES_RECONCILE',
+                            'Inspect and reconcile the owned job; no record removed and no new task started.')
+            failure.rejection_evidence={'phase':'before_conversation_start','task_id':task,
+                                       'new_conversation_started':False,'model_message_sent':False,
+                                       'owner_task':previous.get('task'),'owner_conversation_id':previous.get('conversation_id'),
+                                       'owner_record_sha256':hashlib.sha256(active_path.read_bytes()).hexdigest()}
+            raise failure
         rec=read(path)
         if rec and rec['state']=='running':
             rec['state']='uncertain';save(path,rec)

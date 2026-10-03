@@ -144,7 +144,10 @@ def worker(job_id):
         result={'status': 'ERROR','error': e.code if isinstance(e,desktop.Failure) else type(e).__name__,'message': desktop.clean(e.message if isinstance(e,desktop.Failure) else str(e))}
         rec=desktop.read(desktop.STATE/'tasks'/(r['task_id']+'.json'),{})
         previous=rec.get('last_result',{})
-        if previous!=previous_result and previous.get('error')==result['error']:result.update(previous)
+        proof=getattr(e,'rejection_evidence',None)
+        if result['error']=='STALE_ACTIVE_REQUIRES_RECONCILE' and isinstance(proof,dict):
+            result.update(outcome='not_executed',conversation_id=None,task=r['task_id'],rejection_evidence=proof)
+        elif previous!=previous_result and previous.get('error')==result['error']:result.update(previous)
         elif result['error'] in ('CANCELED','QUEUE_TIMEOUT','TASK_BUSY','DESKTOP_STATE_UNKNOWN','CONTEXT_MISMATCH','OUTCOME_UNCERTAIN'):result['outcome']='not_executed'
     with (directory/'events.jsonl').open('a') as events:
         desktop.expose(r['task_id'],'bridge_result',result,events)
@@ -229,6 +232,18 @@ def reconcile_job(job_id, backend_factory=desktop.Desktop):
             raise desktop.Failure('RECONCILE_BUSY')
         for x in owned:
             result=desktop.read(jobpath(x['job_id'])/'result.json',{})
+            proof=result.get('rejection_evidence',{})
+            owner_path=archived or desktop.slot_path(owner['slot'],'active')
+            if (result.get('error')=='STALE_ACTIVE_REQUIRES_RECONCILE' and result.get('outcome')=='not_executed'
+                    and x.get('status')=='failed' and x.get('outcome')=='not_executed'
+                    and 'conversation_id' in result and result['conversation_id'] is None and result.get('task')==task_id
+                    and isinstance(proof,dict) and proof.get('new_conversation_started') is False
+                    and proof.get('model_message_sent') is False
+                    and proof=={'phase':'before_conversation_start','task_id':task_id,
+                                'new_conversation_started':False,'model_message_sent':False,
+                                'owner_task':task_id,'owner_conversation_id':cid,
+                                'owner_record_sha256':hashlib.sha256(owner_path.read_bytes()).hexdigest()}):
+                continue
             if (result.get('outcome') not in ('turn_returned','turn_failed','not_executed')
                     or result.get('conversation_id')!=cid):
                 raise desktop.Failure('RECONCILE_UNVERIFIED')
@@ -243,9 +258,7 @@ def reconcile_job(job_id, backend_factory=desktop.Desktop):
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise desktop.Failure('RECONCILE_BUSY') from None
             snapshot=backend_factory().trajectory(cid)
-            state=desktop.conversation_state(snapshot)
-            if state['readiness']!='ready' or state['unfinished_steps']!=0:
-                raise desktop.Failure('RECONCILE_UNVERIFIED')
+            state=desktop.verify_terminal_trajectory(snapshot)
             if archived:
                 return {'status':'reconciled','job_id':job_id,'task_id':task_id,
                         'archive_path':str(archived),'submitted':False,'reused_reconciliation':True}
