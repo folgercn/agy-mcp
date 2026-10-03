@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,21 +49,29 @@ class UsageTracker:
         self.stats_file.parent.mkdir(parents=True, exist_ok=True)
         with self.stats_file.with_suffix(self.stats_file.suffix + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            self._load()
+            try:
+                loaded = json.loads(self.stats_file.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                loaded = {"version": 1, "last_updated": None, "total_switches": 0, "accounts": {}}
+            if not isinstance(loaded, dict) or not isinstance(loaded.get("accounts"), dict):
+                raise ValueError("Invalid usage statistics; refusing to overwrite")
+            self._data = loaded
             yield
 
     def _save_sync(self) -> None:
         """Atomically persist current data to disk."""
+        self.stats_file.parent.mkdir(parents=True, exist_ok=True)
+        self._data["last_updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+        tmp_file = self.stats_file.with_name(f"{self.stats_file.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
         try:
-            self.stats_file.parent.mkdir(parents=True, exist_ok=True)
-            self._data["last_updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            payload = json.dumps(self._data, ensure_ascii=False, indent=2)
-
-            tmp_file = self.stats_file.with_name(f"{self.stats_file.name}.tmp.{os.getpid()}")
-            tmp_file.write_text(payload, encoding="utf-8")
+            with tmp_file.open("x", encoding="utf-8") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
             tmp_file.replace(self.stats_file)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.error("Failed to persist usage stats to %s: %s", self.stats_file, e)
+        finally:
+            tmp_file.unlink(missing_ok=True)
 
     def _ensure_account(self, email: str, account_id: str | None = None) -> dict[str, Any]:
         """Ensure account entry exists and return its dict."""
@@ -90,7 +99,7 @@ class UsageTracker:
         task_id: str | None = None,
         prompt_preview: str | None = None,
     ) -> None:
-        """Record an executed task dispatched to an account."""
+        """Record a submit attempt, including retries/rejections; not completion evidence."""
         if not email:
             return
         async with self._lock:
