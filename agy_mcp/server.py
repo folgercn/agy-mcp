@@ -263,6 +263,15 @@ def create_mcp_server():
         """
         return await invoke('submit', {'task_id': task_id, 'prompt': prompt, 'cwd': cwd, 'request_id': request_id, 'mode': mode, 'timeout_seconds': timeout_seconds, 'ack_uncertain': ack_uncertain})
 
+    @mcp.tool(name="reconcile")
+    async def reconcile_tool(job_id: str) -> dict:
+        """Archive an owned dead slot only after terminal jobs and live idle proof.
+
+        Does not cancel, retry, delete history, or resolve uncertain execution.
+        Use the existing job ID; busy/unknown state fails closed.
+        """
+        return await invoke("reconcile", {"job_id": job_id})
+
     @mcp.tool(name="message")
     async def message_tool(
         task_id: str,

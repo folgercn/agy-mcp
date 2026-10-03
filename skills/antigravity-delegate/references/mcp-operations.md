@@ -4,6 +4,16 @@ Server: `antigravity`, stdio `agy-mcp --transport stdio`, dependencies declared 
 
 ## Normal MCP workflow
 
+`submit` requires one existing exact single-folder project environment. The
+connector verifies the native startup environment ID and sole workspace URI
+before sending a model message; missing receipts cannot be bypassed with
+`ack_uncertain`. No automatic environment registration or default fallback.
+
+`reconcile(job_id)` archives an owned stale slot after terminal related jobs,
+known results, dead processes and live idle/zero unfinished proof. It does not
+retry, cancel, delete history or acknowledge uncertain execution. Retries
+recheck current state and reuse the preserved archive.
+
 Discover server `antigravity` in the current tool catalog and invoke its `status` tool. Disk configuration or an independent SDK client proves neither current-task tool loading nor desktop model responsiveness. `status` checks bridge state only; a completed minimal submit/wait/result checks a model round trip when requested. Tools missing from the catalog require a supported host reload or reopening Codex; do not promise that a new message automatically loads them. Keep other tasks running unless a restart is authorized.
 
 Example tool arguments (use returned IDs and cursors; these are not shell commands):

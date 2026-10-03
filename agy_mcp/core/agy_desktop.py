@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import unquote, urlparse
 import uuid
 from pathlib import Path
 
@@ -231,6 +232,26 @@ class Desktop:
             raise Failure('PROJECT_AMBIGUOUS' if matches else 'PROJECT_NOT_FOUND',
                           'Working directory must match exactly one desktop project; no default project is used.')
         return dict(matches[0],cwd=str(path))
+
+    def resolve_environment(self, project, cwd):
+        """Select an existing exact single-folder environment, never the default."""
+        records=self.rpc('ReadProjects',{'ids':[project['project_id']]}).get('projects',[])
+        if len(records)!=1 or records[0].get('id')!=project['project_id']:
+            raise Failure('ENVIRONMENT_UNVERIFIED')
+        matches=[]
+        for env in records[0].get('environments',{}).get('environments',[]):
+            resources=env.get('resources',{}).get('resources',[])
+            if len(resources)!=1:continue
+            resource=resources[0]
+            uri=resource.get('folderUri') or resource.get('gitFolder',{}).get('folderUri')
+            try:matches_cwd=workspace_path(uri)==str(Path(cwd).resolve())
+            except Failure:matches_cwd=False
+            if matches_cwd and isinstance(env.get('id'),str) and env['id']:
+                matches.append(env['id'])
+        if len(matches)!=1:
+            raise Failure('ENVIRONMENT_AMBIGUOUS' if matches else 'ENVIRONMENT_NOT_FOUND',
+                          'Register one exact single-folder environment before submitting.')
+        return matches[0]
 
     def trajectory(self,cid):
         result=self.rpc('GetCascadeTrajectory',{'cascadeId':cid})
@@ -478,6 +499,27 @@ def turn_has_result(steps):
     if last_user<0:return False
     return any(s.get('type') in ('CORTEX_STEP_TYPE_PLANNER_RESPONSE','CORTEX_STEP_TYPE_ERROR_MESSAGE') for s in steps[last_user+1:])
 
+def workspace_path(uri):
+    if not isinstance(uri,str):raise Failure('WORKSPACE_UNVERIFIED')
+    parsed=urlparse(uri)
+    if parsed.scheme!='file' or parsed.netloc not in ('','localhost') or parsed.query or parsed.fragment:
+        raise Failure('WORKSPACE_UNVERIFIED')
+    path=Path(unquote(parsed.path))
+    if not path.is_absolute():raise Failure('WORKSPACE_UNVERIFIED')
+    return str(path.resolve())
+
+
+def verify_workspace(receipt, cid, environment_id, cwd):
+    """The native startup receipt must match before any model message is sent."""
+    info=receipt.get('projectEnvInfo') if isinstance(receipt,dict) else None
+    if (not isinstance(info,dict) or receipt.get('cascadeId')!=cid
+            or info.get('environmentId')!=environment_id or info.get('warning')
+            or not isinstance(info.get('workspaceUris'),list) or len(info['workspaceUris'])!=1
+            or workspace_path(info['workspaceUris'][0])!=str(Path(cwd).resolve())):
+        raise Failure('WORKSPACE_UNVERIFIED')
+    return {'cascadeId':cid,'projectEnvInfo':info}
+
+
 def run_task(args):
     task=args.task; path=STATE/'tasks'/(task+'.json'); deadline=time.monotonic()+args.timeout
     ticket=STATE/'queue'/(f'{time.time_ns():020d}-'+uuid.uuid4().hex+'.json')
@@ -521,17 +563,14 @@ def run_task(args):
         # owned session before allowing another run; never replay its prompt.
         previous=read(active_path)
         if previous:
-            oldcid=previous['conversation_id']
-            if backend.trajectory(oldcid).get('status')!=IDLE:
-                raise Failure('PREVIOUS_TASK_RUNNING','Inspect '+previous['task']+' in desktop; no new task started.')
-            oldpath=STATE/'tasks'/(previous['task']+'.json');old=read(oldpath)
-            if old and old['state']=='running':old['state']='uncertain';save(oldpath,old)
-            (active_path).unlink(missing_ok=True)
+            raise Failure('STALE_ACTIVE_REQUIRES_RECONCILE',
+                          'Inspect and reconcile the owned job; no record removed and no new task started.')
         rec=read(path)
         if rec and rec['state']=='running':
             rec['state']='uncertain';save(path,rec)
         if rec and rec['state']=='uncertain' and not args.ack_uncertain:raise Failure('OUTCOME_UNCERTAIN')
         project=backend.resolve_project(args.cwd)
+        environment_id=backend.resolve_environment(project,args.cwd)
         if rec and rec.get('project',{}).get('project_id')!=project['project_id']:
             raise Failure('PROJECT_CONTEXT_MISMATCH','Use a new task for an unbound or different project; old conversations are not reassigned.')
         emit(event(task,'project_bound',project=project))
@@ -541,9 +580,14 @@ def run_task(args):
         if MODELS[index] not in model_map:raise Failure('MODEL_UNAVAILABLE',MODELS[index])
         cid=(rec or {}).get('conversation_id') or str(uuid.uuid4())
         if rec is None:
-            rec={'task': task,'cwd': args.cwd,'mode': args.mode,'project': project,'conversation_id': cid,'state': 'creating','model_index': index,'turn': 0}
+            rec={'task': task,'cwd': args.cwd,'mode': args.mode,'project': project,'conversation_id': cid,'state': 'creating','model_index': index,'turn': 0,'environment_id':environment_id}
             save(path,rec)
-            backend.rpc('StartCascade',{'cascadeId':cid,'projectEnvConfig':{'projectId':project['project_id'],'defaultProjectEnvironment':{}},'trajectoryType':'CORTEX_TRAJECTORY_TYPE_CASCADE','source':'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT'})
+            receipt=backend.rpc('StartCascade',{'cascadeId':cid,'projectEnvConfig':{'projectId':project['project_id'],'environmentId':environment_id},'trajectoryType':'CORTEX_TRAJECTORY_TYPE_CASCADE','source':'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT'})
+            rec['workspace_receipt']=verify_workspace(receipt,cid,environment_id,args.cwd)
+            save(path,rec)
+        if rec.get('environment_id')!=environment_id:
+            raise Failure('WORKSPACE_UNVERIFIED')
+        verify_workspace(rec.get('workspace_receipt'),cid,environment_id,args.cwd)
         baseline=backend.trajectory(cid)
         trajectory_event(task,'GetCascadeTrajectory:baseline',baseline)
         readiness=conversation_state(baseline)
@@ -648,19 +692,7 @@ def run_task(args):
         save(path,rec);save(STATE/'logs'/(task+'--turn-'+str(rec['turn'])+'.summary.json'),clean(result))
         (active_path).unlink(missing_ok=True)
         event(task,'finished',status=result['status'],conversation_id=cid)
-        # Retention is best effort and must never turn a completed task into failure.
-        with guard():
-            files=[]
-            for f in ([] if active_records() else (STATE/'logs').glob('*')):
-                if f.suffix not in ('.json','.jsonl'):continue
-                try:files.append((f,f.stat()))
-                except FileNotFoundError:continue
-            size=0
-            for f,info in sorted(files,key=lambda x:x[1].st_mtime,reverse=True):
-                size+=info.st_size
-                if time.time()-info.st_mtime>7*86400 or size>100*1024*1024:
-                    try:f.unlink(missing_ok=True)
-                    except OSError:pass
+        # Keep historical effects and recovery evidence; no implicit log deletion.
         return result
     except BaseException as exc:
         code=exc.code if isinstance(exc,Failure) else type(exc).__name__
