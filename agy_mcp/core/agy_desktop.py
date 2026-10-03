@@ -560,7 +560,9 @@ def verify_terminal_trajectory(snapshot):
         raise Failure('RECONCILE_UNVERIFIED')
     steps=trajectory['steps']
     total=snapshot.get('numTotalSteps',len(steps))
-    terminal={'CORTEX_STEP_STATUS_DONE','CORTEX_STEP_STATUS_ERROR','CORTEX_STEP_STATUS_CANCELED'}
+    # Native CLEARED is compacted, non-running history, not execution success.
+    terminal={'CORTEX_STEP_STATUS_DONE','CORTEX_STEP_STATUS_ERROR','CORTEX_STEP_STATUS_CANCELED',
+              'CORTEX_STEP_STATUS_CLEARED'}
     if (snapshot.get('status')!=IDLE or type(total) is not int or total<0 or total!=len(steps)
             or any(not isinstance(step,dict) or step.get('status') not in terminal for step in steps)):
         raise Failure('RECONCILE_UNVERIFIED')
