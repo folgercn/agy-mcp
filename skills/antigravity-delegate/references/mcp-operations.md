@@ -14,6 +14,12 @@ known results, dead processes and live idle/zero unfinished proof. It does not
 retry, cancel, delete history or acknowledge uncertain execution. Retries
 recheck current state and reuse the preserved archive.
 
+Live trajectory pagination retries up to three snapshots, with a shared
+64-page/100000-step read budget. A paginated IDLE result rechecks its terminal
+boundary; unknown or incomplete recovery proof still blocks reconciliation.
+`TRAJECTORY_UNSTABLE` does not cancel an in-flight turn: retain its uncertain
+record and observe the same job/conversation, never resubmit or clear its slot.
+
 Discover server `antigravity` in the current tool catalog and invoke its `status` tool. Disk configuration or an independent SDK client proves neither current-task tool loading nor desktop model responsiveness. `status` checks bridge state only; a completed minimal submit/wait/result checks a model round trip when requested. Tools missing from the catalog require a supported host reload or reopening Codex; do not promise that a new message automatically loads them. Keep other tasks running unless a restart is authorized.
 
 Example tool arguments (use returned IDs and cursors; these are not shell commands):

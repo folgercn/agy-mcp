@@ -254,23 +254,48 @@ class Desktop:
         return matches[0]
 
     def trajectory(self,cid):
-        result=self.rpc('GetCascadeTrajectory',{'cascadeId':cid})
-        trajectory=result.get('trajectory') if isinstance(result,dict) else None
-        if not isinstance(trajectory,dict) or not isinstance(trajectory.get('steps'),list):
-            raise Failure('INCOMPLETE_TRAJECTORY')
-        steps=trajectory['steps']
-        total=result.get('numTotalSteps',len(steps))
-        if type(total) is not int or total<0 or len(steps)>total:
-            raise Failure('INCOMPLETE_TRAJECTORY')
-        while len(steps)<total:
-            page=self.rpc('GetCascadeTrajectorySteps',{'cascadeId':cid,'stepOffset':len(steps)})
-            if not isinstance(page,dict):raise Failure('INCOMPLETE_TRAJECTORY')
-            new=page.get('steps',[])
-            if (not isinstance(new,list) or not new or len(steps)+len(new)>total
-                    or type(page.get('numTotalSteps',total)) is not int
-                    or page.get('numTotalSteps',total)!=total):raise Failure('INCOMPLETE_TRAJECTORY')
-            steps.extend(new)
-        return result
+        # Native pages have no snapshot token. An appended step can overtake the
+        # first reported total; reread rather than treating live growth as damage.
+        def unpack(result):
+            trajectory=result.get('trajectory') if isinstance(result,dict) else None
+            if not isinstance(trajectory,dict) or not isinstance(trajectory.get('steps'),list):
+                raise Failure('INCOMPLETE_TRAJECTORY')
+            steps=trajectory['steps']
+            total=result.get('numTotalSteps',len(steps))
+            if type(total) is not int or total<0 or len(steps)>total:
+                raise Failure('INCOMPLETE_TRAJECTORY')
+            if total>100000:raise Failure('TRAJECTORY_UNSTABLE','Trajectory exceeds bounded read capacity.')
+            return list(steps),total
+        pages=0
+        for attempt in range(3):
+            result=self.rpc('GetCascadeTrajectory',{'cascadeId':cid})
+            steps,total=unpack(result)
+            paginated=len(steps)<total
+            restart=False
+            while len(steps)<total:
+                if pages>=64:raise Failure('TRAJECTORY_UNSTABLE','Bounded page budget exhausted.')
+                pages+=1
+                page=self.rpc('GetCascadeTrajectorySteps',{'cascadeId':cid,'stepOffset':len(steps)})
+                if not isinstance(page,dict):raise Failure('INCOMPLETE_TRAJECTORY')
+                new=page.get('steps',[]);reported=page.get('numTotalSteps',total)
+                if (not isinstance(new,list) or not new or type(reported) is not int
+                        or reported<total):raise Failure('INCOMPLETE_TRAJECTORY')
+                if len(steps)+len(new)>100000 or reported>100000:
+                    raise Failure('TRAJECTORY_UNSTABLE','Trajectory exceeds bounded read capacity.')
+                if len(steps)+len(new)>total or reported>total:
+                    restart=True;break
+                steps.extend(new)
+            if restart:continue
+            if paginated and result.get('status')==IDLE:
+                # Recovery needs a stable terminal boundary after collecting pages.
+                latest=self.rpc('GetCascadeTrajectory',{'cascadeId':cid})
+                prefix,current_total=unpack(latest)
+                if (latest.get('status')!=IDLE or current_total!=total
+                        or prefix!=steps[:len(prefix)]):continue
+                result=latest
+            result['trajectory']['steps']=steps
+            return result
+        raise Failure('TRAJECTORY_UNSTABLE','No consistent snapshot within three reads.')
     def cancel(self,cid):
         self.rpc('CancelCascadeInvocation',{'cascadeId':cid,'killBackgroundTasks':True})
         for _ in range(10):
@@ -724,7 +749,7 @@ def run_task(args):
     except BaseException as exc:
         code=exc.code if isinstance(exc,Failure) else type(exc).__name__
         canceled=None
-        if sent and backend and cid:
+        if sent and backend and cid and code!='TRAJECTORY_UNSTABLE':
             try:canceled=backend.cancel(cid)
             except Exception:canceled=False  # noqa: BLE001
         if cid:
