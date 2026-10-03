@@ -8,7 +8,7 @@
 [![Tests](https://github.com/folgercn/agy-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/folgercn/agy-mcp/actions/workflows/tests.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon-111827?logo=apple)
-![MCP](https://img.shields.io/badge/MCP-14%20tools-6366F1)
+![MCP](https://img.shields.io/badge/MCP-15%20tools-6366F1)
 
 [快速开始](#快速开始) · [工具一览](#工具一览) · [运行边界](#运行边界) · [更新记录](CHANGELOG.md)
 
@@ -29,7 +29,7 @@ agy MCP 是一个独立 Python 服务，通过本机 Antigravity Desktop 后端�
 | **看清账号额度** | 查询 Gemini / Claude 五小时及周额度、对应重置时间；缺失数据保留未知 |
 | **验证后切号** | 先检查任务排空，再核验 Desktop 实际身份与 Gemini 两个额度窗口 |
 | **改代码即生效** | 业务模块每次调用加载；正在执行的任务保持原代码，不重派 |
-| **减少日志体积** | 轨迹与分页记录摘要，保留动作进度和结果；历史终态任务自动清理 |
+| **减少日志体积** | 轨迹与分页记录摘要，保留动作进度和结果；恢复过程保留历史记录 |
 
 ## 快速开始
 
@@ -92,7 +92,7 @@ flowchart LR
 
 | 场景 | 工具 |
 | :--- | :--- |
-| 项目与执行 | `projects` · `submit` · `message` · `cancel` |
+| 项目与执行 | `projects` · `submit` · `message` · `cancel` · `reconcile` |
 | 进度与结果 | `watch` · `status` · `result` · `events` · `wait` |
 | 账号与能力 | `list_accounts` · `account_usage` · `switch_account` · `account_leaderboard` · `tool_status` |
 
@@ -103,7 +103,9 @@ flowchart LR
 - **切号会重启 Antigravity**，必须确认任务排空；身份或额度未知时阻止派单。
 - **业务更新无需重启**：账号、额度、切号、任务、观察和结果均按调用加载。首次启用此架构，以及工具参数、连接认证、环境或依赖变更仍需相应重载。
 - **终态不等于交付**：`REVIEW_REQUIRED`、`TASK_BUSY`、空队列或模型自报成功都不能代替真实改动与验收。
-- **历史记录有保留上限**：有结果文件的终态 job 在超过 3 天或排在全部有效 job 最新 5 项之外时会被删除。运行中任务不删；需要审计的记录请提前归档。
+- **恢复不删历史**：初始化与任务结束不再自动删除 job/日志；`reconcile(job_id)` 将已证明停止的占用记录原样归档，保留结果及证据。历史清理需单独授权。
+- **目录必须可验证**：提交前须在原项目登记唯一单目录 environment；核验启动回执的环境 ID 和唯一 workspace URI 后才发送模型消息。旧任务缺少已验回执时拒绝续发，不迁移到默认环境。
+- **占用恢复显式执行**：`reconcile` 使用原 owned job ID，要求关联 job 已终态、结果已知、进程已退出且实时会话 IDLE/无未完成步骤。busy/unknown 拒绝，不能用新 task ID 绕过。
 - **运行数据不入库**：任务、事件、结果可能包含上下文。凭证、个人状态和备份都应保留在本机。
 
 ## 项目结构

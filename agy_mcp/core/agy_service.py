@@ -29,7 +29,8 @@ JOB_RETENTION_COUNT=5
 def init():
     os.umask(0o077)
     for p in (desktop.STATE,desktop.STATE/'tasks',desktop.STATE/'queue',desktop.STATE/'logs',ROOT,JOBS):p.mkdir(parents=True,exist_ok=True)
-    prune_jobs()
+    # Recovery must not erase the historical ownership/effect evidence at startup.
+    # Explicit retention remains available separately from business dispatch.
 
 @contextlib.contextmanager
 def guard():
@@ -143,7 +144,10 @@ def worker(job_id):
         result={'status': 'ERROR','error': e.code if isinstance(e,desktop.Failure) else type(e).__name__,'message': desktop.clean(e.message if isinstance(e,desktop.Failure) else str(e))}
         rec=desktop.read(desktop.STATE/'tasks'/(r['task_id']+'.json'),{})
         previous=rec.get('last_result',{})
-        if previous!=previous_result and previous.get('error')==result['error']:result.update(previous)
+        proof=getattr(e,'rejection_evidence',None)
+        if result['error']=='STALE_ACTIVE_REQUIRES_RECONCILE' and isinstance(proof,dict):
+            result.update(outcome='not_executed',conversation_id=None,task=r['task_id'],rejection_evidence=proof)
+        elif previous!=previous_result and previous.get('error')==result['error']:result.update(previous)
         elif result['error'] in ('CANCELED','QUEUE_TIMEOUT','TASK_BUSY','DESKTOP_STATE_UNKNOWN','CONTEXT_MISMATCH','OUTCOME_UNCERTAIN'):result['outcome']='not_executed'
     with (directory/'events.jsonl').open('a') as events:
         desktop.expose(r['task_id'],'bridge_result',result,events)
@@ -185,6 +189,91 @@ def result(job_id,offset=0,max_chars=8000):
     text=r.get('result',{}).get('response','');end=min(len(text),offset+max_chars)
     observed=desktop.read(jobpath(job_id)/'conversation-observation.json',{})
     return dict(brief(d),conversation_result=observation.page(observed,offset,max_chars) if observed else None,project=r.get('project') or d.get('project') or 'unknown',result_status=r.get('status'),error=r.get('error'),message=r.get('message'),outcome=r.get('outcome'),cancel_confirmed=r.get('cancel_confirmed'),response=text[offset:end],next_offset=end if end<len(text) else None,issues=r.get('issues',[]),recovery=r.get('recovery'),efficiency=r.get('efficiency'),result_path=str(jobpath(job_id)/'result.json'))
+
+def reconcile_job(job_id, backend_factory=desktop.Desktop):
+    """Archive only a proven dead owned slot; never retry work or clear uncertainty.
+
+    Bridge/control/execution locks serialize submission, slot allocation and
+    recovery. The rename preserves the exact active record for audit/restart.
+    """
+    valid(job_id)
+    with guard(), desktop.guard():
+        job=desktop.read(jobpath(job_id)/'job.json',{})
+        task_id=job.get('task_id')
+        if job.get('job_id')!=job_id or not isinstance(task_id,str):
+            raise desktop.Failure('RECONCILE_UNVERIFIED')
+        valid(task_id)
+        rec=desktop.read(desktop.STATE/'tasks'/(task_id+'.json'),{})
+        owners=[x for x in desktop.active_records() if x.get('task')==task_id]
+        cid=rec.get('conversation_id')
+        archived=None
+        if not owners:
+            for archive in (desktop.STATE/'reconciled').glob(job_id+'-*.active.json'):
+                evidence=desktop.read(archive.with_suffix('.evidence.json'),{})
+                if (evidence.get('conversation_id')==cid and evidence.get('task_id')==task_id
+                        and evidence.get('job_id')==job_id
+                        and evidence.get('archive_sha256')==hashlib.sha256(archive.read_bytes()).hexdigest()):
+                    owner=desktop.read(archive,{})
+                    owner['slot']=evidence['slot']
+                    owners=[owner];archived=archive;break
+        if len(owners)!=1:raise desktop.Failure('RECONCILE_UNVERIFIED')
+        owner=owners[0]
+        if type(owner.get('slot')) is not int or not 0<=owner['slot']<4:
+            raise desktop.Failure('RECONCILE_UNVERIFIED')
+        if not cid or owner.get('conversation_id')!=cid or rec.get('state')!='idle':
+            raise desktop.Failure('RECONCILE_UNVERIFIED')
+        related=[desktop.read(p,{}) for p in JOBS.glob('*/job.json')]
+        owned=[x for x in related if x.get('task_id')==task_id]
+        if not owned or any(x.get('status') not in TERMINAL for x in owned):
+            raise desktop.Failure('RECONCILE_BUSY')
+        if any(type(x.get('pid')) is not int or x['pid']<=0 for x in [owner,*owned]):
+            raise desktop.Failure('RECONCILE_UNVERIFIED')
+        if any(desktop.alive(x['pid']) for x in [owner,*owned]):
+            raise desktop.Failure('RECONCILE_BUSY')
+        for x in owned:
+            result=desktop.read(jobpath(x['job_id'])/'result.json',{})
+            proof=result.get('rejection_evidence',{})
+            owner_path=archived or desktop.slot_path(owner['slot'],'active')
+            if (result.get('error')=='STALE_ACTIVE_REQUIRES_RECONCILE' and result.get('outcome')=='not_executed'
+                    and x.get('status')=='failed' and x.get('outcome')=='not_executed'
+                    and 'conversation_id' in result and result['conversation_id'] is None and result.get('task')==task_id
+                    and isinstance(proof,dict) and proof.get('new_conversation_started') is False
+                    and proof.get('model_message_sent') is False
+                    and proof=={'phase':'before_conversation_start','task_id':task_id,
+                                'new_conversation_started':False,'model_message_sent':False,
+                                'owner_task':task_id,'owner_conversation_id':cid,
+                                'owner_record_sha256':hashlib.sha256(owner_path.read_bytes()).hexdigest()}):
+                continue
+            if (result.get('outcome') not in ('turn_returned','turn_failed','not_executed')
+                    or result.get('conversation_id')!=cid):
+                raise desktop.Failure('RECONCILE_UNVERIFIED')
+        for path in (desktop.STATE/'queue').glob('*.json'):
+            queued=desktop.read(path,{})
+            if queued.get('task')==task_id:
+                pid=queued.get('pid')
+                if type(pid) is not int or pid<=0 or desktop.alive(pid):
+                    raise desktop.Failure('RECONCILE_BUSY')
+        lock=desktop.slot_path(owner['slot'],'execution').open('a')
+        try:
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise desktop.Failure('RECONCILE_BUSY') from None
+            snapshot=backend_factory().trajectory(cid)
+            state=desktop.verify_terminal_trajectory(snapshot)
+            if archived:
+                return {'status':'reconciled','job_id':job_id,'task_id':task_id,
+                        'archive_path':str(archived),'submitted':False,'reused_reconciliation':True}
+            directory=desktop.STATE/'reconciled';directory.mkdir(mode=0o700,exist_ok=True)
+            source=desktop.slot_path(owner['slot'],'active')
+            archive=directory/(job_id+'-'+str(time.time_ns())+'.active.json')
+            evidence=archive.with_suffix('.evidence.json')
+            desktop.save(evidence,{'job_id':job_id,'task_id':task_id,'conversation_id':cid,
+                                  'state':state,'blocking_job_ids':[],'archived_at':time.time(),
+                                  'slot':owner['slot'],'archive_sha256':hashlib.sha256(source.read_bytes()).hexdigest()})
+            os.replace(source,archive)
+            return {'status':'reconciled','job_id':job_id,'task_id':task_id,
+                    'archive_path':str(archive),'evidence_path':str(evidence),'submitted':False}
+        finally:lock.close()
+
 
 def projects(cwd='',backend_factory=desktop.Desktop):
     backend=backend_factory()
@@ -319,6 +408,7 @@ async def dispatch(name, arguments, on_events=None, on_status=None):
     """Internal API v1; public tool schemas live in the stable MCP frontend."""
     if name=='account_usage':return await asyncio.to_thread(account.account_usage)
     if name=='projects':return await asyncio.to_thread(projects,**arguments)
+    if name=='reconcile':return await asyncio.to_thread(reconcile_job,**arguments)
     if name=='watch':return await watch_job(**arguments,on_events=on_events,on_status=on_status)
     if name=='events':return await asyncio.to_thread(read_events,**arguments)
     if name=='submit':return await asyncio.to_thread(submit,**arguments)

@@ -8,6 +8,7 @@ RealUpdates=m.Updates
 class Fake:
     pid=123
     def resolve_project(self,cwd):return dict(project_id="fixture",name="fixture",folders=[cwd],cwd=cwd)
+    def resolve_environment(self,project,cwd):return 'fixture-env'
     def __init__(self,task=None):self.task=task
     def rpc(self,method,b,**kw):
         if method=='GetCascadeModelConfigData':return {'clientModelConfigs':[{'label':x,'modelOrAlias':{'model':x}} for x in m.MODELS]}
@@ -16,7 +17,8 @@ class Fake:
         if method=='StartCascade':
             assert b['projectEnvConfig']['projectId']=='fixture'
             assert 'workspaceUris' not in b
-            m.save(p,d);return {'cascadeId':cid}
+            assert b['projectEnvConfig']['environmentId']=='fixture-env'
+            m.save(p,d);return {'cascadeId':cid,'projectEnvInfo':{'environmentId':'fixture-env','workspaceUris':['file:///tmp']}}
         if method=='SendUserCascadeMessage':
             text=b['items'][0]['text'];model=b['cascadeConfig']['plannerConfig']['requestedModel']['model']
             d['steps'].append({'type':'CORTEX_STEP_TYPE_USER_INPUT','status':'CORTEX_STEP_STATUS_DONE'})
@@ -103,7 +105,7 @@ class Tests(unittest.TestCase):
         r=m.run_task(args());cid=r['conversation_id'];p=m.STATE/(cid+'.fake');d=m.read(p);d['until']=time.time()+10;m.save(p,d)
         m.save(m.STATE/'active.json',{'task':'test','conversation_id':cid,'pid':999999})
         with self.assertRaises(m.Failure) as c:m.run_task(args('next'))
-        self.assertEqual(c.exception.code,'PREVIOUS_TASK_RUNNING');self.assertTrue((m.STATE/'active.json').exists())
+        self.assertEqual(c.exception.code,'STALE_ACTIVE_REQUIRES_RECONCILE');self.assertTrue((m.STATE/'active.json').exists())
     def test_orphan_does_not_block_free_slot(self):
         m.save(m.STATE/'config.json',dict(max_concurrency=2))
         m.save(m.STATE/'active.json',dict(task='orphan',conversation_id='unavailable',pid=999999))
