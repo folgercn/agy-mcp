@@ -146,3 +146,67 @@ def test_idle_history_missing_identity_still_blocks(isolated, monkeypatch, cid):
     manager = AsyncMock()
     assert not asyncio.run(sw.guarded_switch(manager, 'target', AsyncMock()))[0]
     manager.switch_account.assert_not_awaited()
+
+
+@pytest.mark.parametrize('slot', [0, 3])
+@pytest.mark.parametrize('record', [{}, None])
+def test_existing_unknown_active_file_refuses_without_endpoints(isolated, monkeypatch, slot, record):
+    path = sw.desktop.slot_path(slot, 'active'); sw.desktop.save(path, record); before = path.read_bytes()
+    backend = AsyncMock(); monkeypatch.setattr(sw.desktop, 'Desktop', backend)
+    manager = AsyncMock(); native = AsyncMock()
+    result = asyncio.run(sw.guarded_switch(manager, 'target', native))
+    assert not result[0] and path.read_bytes() == before
+    manager.switch_account.assert_not_awaited(); native.assert_not_awaited(); backend.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', [None, 'replace', 'fsync'])
+def test_verified_switch_result_survives_statistics_failure(isolated, monkeypatch, failure):
+    import os
+    from pathlib import Path
+    import agy_mcp.usage_tracker as tracker_module
+    if os.environ.get('AGY_COMPAT_ENTRY') == 'server':
+        from agy_mcp import server as entry
+    else:
+        from agy_mcp import business as entry
+    path = isolated/'statistics.json'
+    path.write_text(json.dumps({'version': 1, 'total_switches': 0, 'accounts': {}}))
+    before = path.read_bytes(); tracker = UsageTracker(path)
+    manager = AsyncMock(); manager.get_current_account.return_value = {'email': 'old@example.invalid'}
+    manager.switch_account.return_value = (True, 'mock changed', {'email': 'target@example.invalid'})
+    class Backend:
+        def rpc(self, *args): return {}
+    monkeypatch.setattr(sw.desktop, 'Desktop', Backend)
+    monkeypatch.setattr(entry, 'manager_client', manager); monkeypatch.setattr(entry, 'usage_tracker', tracker)
+    native = AsyncMock(return_value=usage('target@example.invalid')); monkeypatch.setattr(entry, 'invoke', native)
+    if failure == 'replace':
+        original = Path.replace
+        def replace(self, target):
+            if Path(target) == path: raise OSError('ENOSPC')
+            return original(self, target)
+        monkeypatch.setattr(Path, 'replace', replace)
+    if failure == 'fsync':
+        monkeypatch.setattr(tracker_module.os, 'fsync', lambda fd: (_ for _ in ()).throw(OSError('EIO')))
+    async def call():
+        if os.environ.get('AGY_COMPAT_ENTRY') == 'server':
+            out = await entry.create_mcp_server().call_tool('switch_account', {'account_or_email': 'target@example.invalid'})
+            if isinstance(out, tuple): return out[1]
+            if isinstance(out, dict): return out
+            return json.loads(out[0].text)
+        return await entry.switch_account_tool('target@example.invalid')
+    result = asyncio.run(call())
+    assert result['success'] and result['details']['verified'] and not result['details']['dispatch_blocked']
+    assert result['statistics']['saved'] == (failure is None)
+    manager.switch_account.assert_awaited_once(); native.assert_awaited_once()
+    assert not (sw.service.ROOT/'dispatch-block.json').exists()
+    assert not list(isolated.glob('statistics.json.tmp.*'))
+    if failure:
+        assert result['statistics']['error'] == 'STATISTICS_PERSISTENCE_FAILED'
+        assert result['statistics']['error_type'] == 'OSError'
+        assert path.read_bytes() == before
+        # Retry only the statistics write, never the account mutation.
+        monkeypatch.undo()
+        asyncio.run(tracker.record_switch('old@example.invalid', 'target@example.invalid'))
+        assert UsageTracker(path).get_summary()['total_switches'] == 1
+    else:
+        assert UsageTracker(path).get_summary()['total_switches'] == 1
+    manager.switch_account.assert_awaited_once()

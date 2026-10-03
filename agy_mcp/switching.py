@@ -66,7 +66,9 @@ def acquire_barrier():
             record = desktop.read(path, {})
             if record.get('pid') and desktop.alive(record['pid']):
                 raise RuntimeError('QUEUE_NOT_DRAINED')
-        if desktop.active_records():
+        # Presence itself is occupancy: empty/null/malformed evidence is unknown.
+        if any(desktop.slot_path(slot, 'active').exists() or desktop.slot_path(slot, 'active').is_symlink()
+               for slot in range(4)):
             raise RuntimeError('DESKTOP_CONVERSATION_NOT_IDLE')
         backend = desktop.Desktop()
         # Covers desktop work started manually or by other callers as well.

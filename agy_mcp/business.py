@@ -72,22 +72,32 @@ async def switch_account_tool(account_or_email: str) -> dict:
 
     from agy_mcp.switching import guarded_switch
     success, msg, details = await guarded_switch(manager_client, account_or_email, invoke)
+    statistics = None
     if success:
         target_email = details.get("email") or account_or_email
         target_id = details.get("account_id")
 
         if target_email:
-            await usage_tracker.record_switch(
-                from_email=before_email,
-                to_email=target_email,
-                account_id=target_id,
-                reason="codex_instructed_switch",
-            )
-    return {
+            try:
+                await usage_tracker.record_switch(
+                    from_email=before_email,
+                    to_email=target_email,
+                    account_id=target_id,
+                    reason="codex_instructed_switch",
+                )
+                statistics = {"saved": True}
+            except Exception as exc:
+                # The verified mutation has already completed. Never retry it for stats.
+                statistics = {"saved": False, "error": "STATISTICS_PERSISTENCE_FAILED", "error_type": type(exc).__name__}
+                logger.warning("Verified switch statistics were not saved: %s", type(exc).__name__)
+    result = {
         "success": success,
         "message": msg,
         "details": details,
     }
+    if statistics is not None:
+        result["statistics"] = statistics
+    return result
 
 
 async def account_usage_tool() -> dict:

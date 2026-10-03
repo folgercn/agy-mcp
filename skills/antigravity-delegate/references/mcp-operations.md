@@ -91,3 +91,5 @@ Account restart requires a strictly validated current Desktop inventory and comp
 Frontends can hold independent UsageTracker instances. Every statistics update uses a stable file lock and reloads the current file before atomic replacement; corrupt input and write failures propagate rather than silently overwriting or losing counts. Task counts describe submit attempts, including retries and rejections, and do not prove completed work.
 
 Controlled loading of retained local frontend code uses a new frontend process with a unique empty PYTHONPYCACHEPREFIX and PYTHONDONTWRITEBYTECODE=1. This is separate from the source-version same-session reload contract; do not claim host loading from standalone discovery.
+
+A present active-slot file always blocks account restart, even if it contains empty/null/malformed evidence; preserve it for diagnosis. A verified account switch remains successful when subsequent statistics persistence fails: the response includes statistics.saved=false and STATISTICS_PERSISTENCE_FAILED, without another Manager call. Retry statistics only after diagnosis; never repeat the account mutation to repair its counter.
