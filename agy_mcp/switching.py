@@ -76,7 +76,9 @@ def acquire_barrier():
         for path in (desktop.STATE / 'tasks').glob('*.json'):
             record = desktop.read(path, {})
             # Only conclusively inactive history may be absent from this account.
-            if not isinstance(record, dict) or record.get('state') not in ('idle', 'retired', 'failed'):
+            cid = record.get('conversation_id') if isinstance(record, dict) else None
+            if (not isinstance(record, dict) or record.get('state') not in ('idle', 'retired', 'failed')
+                    or (record.get('state') in ('idle', 'retired') and (not isinstance(cid, str) or not cid.strip()))):
                 raise RuntimeError('DESKTOP_CONVERSATION_NOT_IDLE')
         # Validate every current conversation, including manually started work.
         # Historical cids absent from the validated current inventory are not queried.

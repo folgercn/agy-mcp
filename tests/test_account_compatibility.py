@@ -136,3 +136,13 @@ def test_statistics_save_failure_is_visible_and_retry_reloads(tmp_path, monkeypa
     monkeypatch.setattr(tracker, '_save_sync', original)
     asyncio.run(tracker.record_task('a@example.invalid'))
     assert UsageTracker(path).get_task_count('a@example.invalid') == 1
+
+
+@pytest.mark.parametrize('cid', [None, '', ' ', 0])
+def test_idle_history_missing_identity_still_blocks(isolated, monkeypatch, cid):
+    sw.desktop.save(sw.desktop.STATE/'tasks/history.json', {'conversation_id': cid, 'state': 'idle'})
+    backend = AsyncMock(); backend.rpc = lambda *args: {}
+    monkeypatch.setattr(sw.desktop, 'Desktop', lambda: backend)
+    manager = AsyncMock()
+    assert not asyncio.run(sw.guarded_switch(manager, 'target', AsyncMock()))[0]
+    manager.switch_account.assert_not_awaited()
