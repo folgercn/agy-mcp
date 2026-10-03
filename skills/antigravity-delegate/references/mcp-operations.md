@@ -83,3 +83,11 @@ A call or detached job already running uses its loaded code through completion. 
 For watch, the helper sends raw event pages and waits for the frontend delivery/filter acknowledgment before advancing its cursor. Disconnect terminates only that subscription helper, leaving the detached job untouched. Preserve the last fully received cursor for replay.
 
 This split requires a one-time host reload to replace the previous monolithic frontend. Verify global status contains `runtime.business_reload: per_call`. Thereafter routine business edits need no Codex restart; changing the public tool schema, stable transport or host configuration remains an exceptional reload case. No new port, daemon, credential, configuration item or permission is introduced.
+
+## Account barriers and statistics writers
+
+Account restart requires a strictly validated current Desktop inventory and complete terminal proof for each current conversation. Only conclusively inactive persisted history may be absent from this account; active records and unknown/running/uncertain task states still block. History is preserved across account changes.
+
+Frontends can hold independent UsageTracker instances. Every statistics update uses a stable file lock and reloads the current file before atomic replacement; corrupt input and write failures propagate rather than silently overwriting or losing counts. Task counts describe submit attempts, including retries and rejections, and do not prove completed work.
+
+Controlled loading of retained local frontend code uses a new frontend process with a unique empty PYTHONPYCACHEPREFIX and PYTHONDONTWRITEBYTECODE=1. This is separate from the source-version same-session reload contract; do not claim host loading from standalone discovery.

@@ -39,11 +39,11 @@ def parse_inventory(response):
         raise RuntimeError('DESKTOP_INVENTORY_UNKNOWN')
     if response == {}:
         return {}
-    if 'error' in response:
+    if set(response) != {'trajectorySummaries'}:
         raise RuntimeError('DESKTOP_INVENTORY_UNKNOWN')
     summaries = response.get('trajectorySummaries')
     if not isinstance(summaries, dict) or any(
-        not isinstance(cid, str) or not cid or not isinstance(item, dict)
+        not isinstance(cid, str) or not cid.strip() or not isinstance(item, dict)
         for cid, item in summaries.items()
     ):
         raise RuntimeError('DESKTOP_INVENTORY_UNKNOWN')
@@ -66,6 +66,8 @@ def acquire_barrier():
             record = desktop.read(path, {})
             if record.get('pid') and desktop.alive(record['pid']):
                 raise RuntimeError('QUEUE_NOT_DRAINED')
+        if desktop.active_records():
+            raise RuntimeError('DESKTOP_CONVERSATION_NOT_IDLE')
         backend = desktop.Desktop()
         # Covers desktop work started manually or by other callers as well.
         summaries = parse_inventory(backend.rpc('GetAllCascadeTrajectories', {}))
@@ -73,10 +75,13 @@ def acquire_barrier():
             raise RuntimeError('DESKTOP_HAS_ACTIVE_OR_UNKNOWN_WORK')
         for path in (desktop.STATE / 'tasks').glob('*.json'):
             record = desktop.read(path, {})
-            cid = record.get('conversation_id')
-            # Historical mappings from other accounts are not current Desktop sessions.
-            if cid in summaries and desktop.conversation_state(backend.trajectory(cid))['readiness'] != 'ready':
+            # Only conclusively inactive history may be absent from this account.
+            if not isinstance(record, dict) or record.get('state') not in ('idle', 'retired', 'failed'):
                 raise RuntimeError('DESKTOP_CONVERSATION_NOT_IDLE')
+        # Validate every current conversation, including manually started work.
+        # Historical cids absent from the validated current inventory are not queried.
+        for cid in summaries:
+            desktop.verify_terminal_trajectory(backend.trajectory(cid))
         return handles
     except BaseException:
         for handle in reversed(handles):handle.close()
